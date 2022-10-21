@@ -1,7 +1,8 @@
 import base64
 import json
+import math
 import os
-from PIL import Image
+from filelock import FileLock
 
 img2img_header = {
     "fn_index": 31,
@@ -34,7 +35,7 @@ img2img_header = {
   0,
   0,
   False,
-  512,
+  704,
   1216,
   "Just resize",
   False,
@@ -114,24 +115,29 @@ def save_prompts(prompts):
         json.dump(prompts, f)
 
 def generate_prompts(images):
-    clip_prompts = {}
-    if os.path.exists('clip_prompts.json'):
-        with open('clip_prompts.json', 'r') as f:
-            clip_prompts = json.load(f)
-
     for image in images:
-        if image in clip_prompts:
+        prompt_file = os.path.join('input_images', image + '.txt')
+        if os.path.exists(prompt_file):
             continue
+        image_lock_file = os.path.join('input_images', image + '.lock')
+        if os.path.exists(image_lock_file):
+            continue
+
+        open(image_lock_file, 'w').close()
         print(f'Processing {image}')
         data = interrogate_clip(image)
         print(f'CLIP returned: {data}')
-        clip_prompts[image] = data
-        save_prompts(clip_prompts)
+        data = data[:data.rfind(',')+1]
+        data = data + ' from The Office'
+        with open(prompt_file, 'w') as f:
+            f.write(data)
+        os.remove(image_lock_file)
 
-def generate_frame(image, prompt):
+def sd_img2img(image, prompt, denoising_strength):
     request_body = img2img_header
     request_body['data'][1] = prompt
     request_body['data'][5] = "data:image/jpeg;base64," + base64.b64encode(image).decode('utf-8')
+    request_body['data'][19] = denoising_strength
     r = requests.post(HOST, json=request_body)
     return r.json()['data'][0]
 
@@ -139,28 +145,37 @@ def load_clip_prompts_from_disk():
     with open('clip_prompts.json', 'r') as f:
         return json.load(f)
 
-def generate_frames(images):
+def generate_frame(image_name):
     clip_prompts = load_clip_prompts_from_disk()
-    for image_name in images:
-        if os.path.exists(os.path.join('output_images', image_name.split('.')[0] + '.png')):
-            print(f'_', end='', flush=True)
-            continue
+    if os.path.exists(os.path.join('output_images', image_name.split('.')[0] + '.png')):
+        print(f'_', end='', flush=True)
+        return
 
-        image = open(os.path.join('input_images', image_name), 'rb').read()
-        frame = generate_frame(image, clip_prompts[image_name])
-        with open(os.path.join('output_images', image_name.split('.')[0] + '.png'), 'wb') as f:
-            f.write(base64.b64decode(frame[0].split(',')[1]))
-        print(f'#', end='', flush=True)
+    input_file_name = os.path.join('input_images', image_name)
+    image = open(input_file_name, 'rb').read()
+    output_file_name = os.path.join('output_images', image_name.split('.')[0] + '.png')
+    output_lock_file_name = output_file_name + '.lock'
+    if os.path.exists(output_lock_file_name):
+        return
+    open(output_lock_file_name, 'w').close()
 
+    frame_num = int(image_name.split('.')[0])
+    denoising_strength = (math.sin(frame_num/24)+2.5)/7
+    frame = sd_img2img(image, clip_prompts[image_name], denoising_strength)
+    with open(output_file_name, 'wb') as f:
+        f.write(base64.b64decode(frame[0].split(',')[1]))
+    os.remove(output_lock_file_name)
 
+    print(f'# {denoising_strength}')
 
 if not os.path.exists('output_images'):
     os.mkdir('output_images')
 
-# images = [f for f in sorted(os.listdir('input_images') if f.endswith('.jpg')]
 images = os.listdir('input_images')
+# only jpg
+images = [image for image in images if image.endswith('.jpg')]
 images.sort()
-images = images[:1000]
 
 generate_prompts(images)
-generate_frames(images)
+# for image in images:
+#     generate_frame(image)

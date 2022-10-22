@@ -2,7 +2,7 @@ import base64
 import json
 import math
 import os
-from filelock import FileLock
+import requests
 
 img2img_header = {
     "fn_index": 31,
@@ -91,11 +91,7 @@ img2img_header = {
 ]
 }
 
-import requests
-
 HOST = 'http://' + os.environ.get('HOSTNAME_AND_PORT') + '/api/predict/'
-
-
 
 def interrogate_clip(filename):
     with open(os.path.join('input_images', filename), 'rb') as f:
@@ -133,20 +129,16 @@ def generate_prompts(images):
             f.write(data)
         os.remove(image_lock_file)
 
-def sd_img2img(image, prompt, denoising_strength):
+def sd_img2img(image, prompt, denoising_strength, cfg_strength):
     request_body = img2img_header
     request_body['data'][1] = prompt
     request_body['data'][5] = "data:image/jpeg;base64," + base64.b64encode(image).decode('utf-8')
     request_body['data'][19] = denoising_strength
+    request_body['data'][18] = cfg_strength
     r = requests.post(HOST, json=request_body)
     return r.json()['data'][0]
 
-def load_clip_prompts_from_disk():
-    with open('clip_prompts.json', 'r') as f:
-        return json.load(f)
-
 def generate_frame(image_name):
-    clip_prompts = load_clip_prompts_from_disk()
     if os.path.exists(os.path.join('output_images', image_name.split('.')[0] + '.png')):
         print(f'_', end='', flush=True)
         return
@@ -159,9 +151,16 @@ def generate_frame(image_name):
         return
     open(output_lock_file_name, 'w').close()
 
+    prompt_file_name = os.path.join('input_images', image_name + '.txt')
+    if not os.path.exists(prompt_file_name):
+        print(f'No prompt for {image_name}')
+        return
+
     frame_num = int(image_name.split('.')[0])
     denoising_strength = (math.sin(frame_num/24)+2.5)/7
-    frame = sd_img2img(image, clip_prompts[image_name], denoising_strength)
+    # denoising_strength = 0.30
+    cfg_strength = 10.5
+    frame = sd_img2img(image, clip_prompt, denoising_strength, cfg_strength)
     with open(output_file_name, 'wb') as f:
         f.write(base64.b64decode(frame[0].split(',')[1]))
     os.remove(output_lock_file_name)
@@ -176,6 +175,6 @@ images = os.listdir('input_images')
 images = [image for image in images if image.endswith('.jpg')]
 images.sort()
 
-generate_prompts(images)
-# for image in images:
-#     generate_frame(image)
+# generate_prompts(images)
+for image in images:
+    generate_frame(image)

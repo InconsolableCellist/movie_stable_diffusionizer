@@ -160,6 +160,7 @@ def generate_frame(image_name):
     denoising_strength = (math.sin(frame_num/24)+2.5)/7
     # denoising_strength = 0.30
     cfg_strength = 10.5
+    clip_prompt = open(prompt_file_name, 'r').read()
     frame = sd_img2img(image, clip_prompt, denoising_strength, cfg_strength)
     with open(output_file_name, 'wb') as f:
         f.write(base64.b64decode(frame[0].split(',')[1]))

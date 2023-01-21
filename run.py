@@ -1,39 +1,46 @@
+import base64
+import glob
 import json
 import math
 import os
+import time
+from datetime import datetime
+
 import requests
 
 # 1 = prompt
 # 2 = negative prompt
-# 20 = cfg scale
-# 21 = denoising str
+# 21 = cfg scale
+# 22 = denoising str
 # 28 = height
 # 29 = width
+INDEX_PROMPT = 2
+INDEX_NEGATIVE_PROMPT = 3
+INDEX_CFG_STRENGTH = 21
+INDEX_DENOISING_STRENGTH = 22
+INDEX_HEIGHT = 28
+INDEX_WIDTH = 29
+INDEX_IMAGE = 5
+
 NEGATIVE_PROMPT = "worst quality, low quality, what has science done, what, nightmare fuel, eldritch horror, where is your god now, why"
 
 img2img_header = {
-    "fn_index": 74,
+    "fn_index": 130,
     "session_hash": "b8s3udj15yp",
     "data":
 [
-  0,
-  "example prompt",
-  "negative prompt",
-  "None",
-  "None",
-  "data:image/png;base64,",
-    [
+        "task(p4bcvsl1kjtembc)",
         0,
         "prompt",
         "negative prompt",
-        "None",
-        "None",
+        [],
         "data:image/jpeg;base64,",
         None,
         None,
         None,
         None,
-        "Draw mask",
+        None,
+        None,
         20,
         "Euler a",
         4,
@@ -54,7 +61,7 @@ img2img_header = {
         512,
         960,
         "Just resize",
-        False,
+        "Whole picture",
         32,
         "Inpaint masked",
         "",
@@ -76,23 +83,14 @@ img2img_header = {
         "",
         128,
         8,
-        [
-            "left",
-            "right",
-            "up",
-            "down"
-        ],
+        ["left","right","up","down"],
         1,
         0.05,
         128,
         4,
         "fill",
-        [
-            "left",
-            "right",
-            "up",
-            "down"
-        ],
+        ["left","right","up","down"],
+        False,
         False,
         False,
         False,
@@ -100,6 +98,7 @@ img2img_header = {
         "",
         64,
         "None",
+        2,
         "Seed",
         "",
         "Nothing",
@@ -107,11 +106,11 @@ img2img_header = {
         True,
         False,
         False,
-        None,
+        [{"data":"", "is_file":False, "name":""}],
+        "",
         "",
         "",
     ]
-]
 }
 
 HOST = 'http://' + os.environ.get('HOSTNAME_AND_PORT') + '/run/predict/'
@@ -120,11 +119,18 @@ def interrogate_clip(filename):
     with open(os.path.join('input_images', filename), 'rb') as f:
         b64 = base64.b64encode(f.read())
     request_body = {
-        "fn_index": 75,
+        "fn_index": 131,
         "data": [
-            "data:image/jpeg;base64," + b64.decode('utf-8')
+            0,
+            "",
+            "",
+            "data:image/jpeg;base64," + b64.decode('utf-8'),
+            None,
+            None,
+            None,
+            None
         ],
-        "session_hash": "b8s3udj15yp"
+        "session_hash": "20zbc7lw2rc"
     }
     r = requests.post(HOST, json=request_body)
     # if data not in r
@@ -159,13 +165,21 @@ def generate_prompts(images):
 
 def sd_img2img(image, prompt, denoising_strength, cfg_strength):
     request_body = img2img_header
-    request_body['data'][1] = prompt
-    request_body['data'][2] = NEGATIVE_PROMPT
-    request_body['data'][5] = "data:image/jpeg;base64," + base64.b64encode(image).decode('utf-8')
-    request_body['data'][21] = denoising_strength
-    request_body['data'][20] = cfg_strength
+    request_body['data'][INDEX_PROMPT] = prompt
+    request_body['data'][INDEX_NEGATIVE_PROMPT] = NEGATIVE_PROMPT
+    request_body['data'][INDEX_IMAGE] = "data:image/jpeg;base64," + base64.b64encode(image).decode('utf-8')
+    request_body['data'][INDEX_DENOISING_STRENGTH] = denoising_strength
+    request_body['data'][INDEX_CFG_STRENGTH] = cfg_strength
     r = requests.post(HOST, json=request_body)
-    return r.json()['data'][0]
+    d = r.json()
+    if 'data' not in d:
+        print("Unexpected response from server")
+        print(d)
+    filename = d['data'][0][0]['name']
+    print(f'Generated {filename}')
+    # perform a GET to http://HOSTNAME_AND_PORT/file=filename
+    r = requests.get('http://' + os.environ.get('HOSTNAME_AND_PORT') + '/file=' + filename)
+    return r.content
 
 def generate_frame(image_name):
     if os.path.exists(os.path.join('output_images', image_name.split('.')[0] + '.png')):
@@ -187,14 +201,14 @@ def generate_frame(image_name):
 
     frame_num = int(image_name.split('.')[0])
     denoising_strength = (math.sin(frame_num/24)+2.5)/7
-    denoising_strength = 0.42
+    # denoising_strength = 0.42
     # cfg_strength = 14
     # cfg_strength = 23
     cfg_strength = 16
     clip_prompt = open(prompt_file_name, 'r').read()
     frame = sd_img2img(image, clip_prompt, denoising_strength, cfg_strength)
     with open(output_file_name, 'wb') as f:
-        f.write(base64.b64decode(frame[0].split(',')[1]))
+        f.write(frame)
     os.remove(output_lock_file_name)
 
     print(f'# {denoising_strength}')
@@ -202,11 +216,42 @@ def generate_frame(image_name):
 if not os.path.exists('output_images'):
     os.mkdir('output_images')
 
-images = os.listdir('input_images')
-# only jpg
-images = [image for image in images if image.endswith('.jpg')]
-images.sort()
+if not os.path.exists(os.path.join('input_images', 'done')):
+    os.mkdir(os.path.join('input_images', 'done'))
 
-generate_prompts(images)
-# for image in images:
-#     generate_frame(image)
+looptime = datetime.now()
+loop_count = 0
+while True:
+    try:
+        lockfiles = glob.glob(os.path.join('input_images', '*.lock'))
+        lockfiles = [f for f in lockfiles if time.time() - os.path.getctime(f) > 60]
+        for f in lockfiles:
+            print(f"Removing stuck lockfile {f}")
+            os.remove(f)
+    except Exception as e:
+        print(f"Error removing lockfiles: {e}. Perhaps they were removed by another process?")
+
+    images = os.listdir('input_images')
+    images = [image for image in images if image.endswith('.jpg')]
+    images.sort()
+
+    failure = False
+    for image in images:
+        try:
+            generate_frame(image)
+            generate_prompts(images)
+        except Exception as e:
+            failure = True
+            break
+
+    if (datetime.now() - looptime).total_seconds() < 30:
+        print("Loop took less than 30s")
+        loop_count += 1
+        if loop_count > 3:
+            print("Loop took less than 30s 3 times in a row. Exiting.")
+            break
+    else:
+        loop_count = 0
+    looptime = datetime.now()
+
+print("Process exited normally.")
